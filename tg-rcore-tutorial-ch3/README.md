@@ -57,11 +57,11 @@ tg-rcore-tutorial-ch3/
 
 ## DoD 验收标准（本章完成判据）
 
-- [ ] 能运行 `cargo run` 并说明抢占式调度（时钟中断）发生的证据
-- [ ] 能运行 `cargo run --features coop` 并说明协作式调度与抢占式差异
-- [ ] 能解释 `TaskControlBlock` 中“上下文/栈/完成状态”的作用
-- [ ] 能从 Trap 分支区分 `SupervisorTimer` 与 `UserEnvCall` 两类事件
-- [ ] 能完成 `./test.sh base`（以及练习时 `./test.sh exercise`）
+- [x] 能运行 `cargo run` 并说明抢占式调度（时钟中断）发生的证据
+- [x] 能运行 `cargo run --features coop` 并说明协作式调度与抢占式差异
+- [x] 能解释 `TaskControlBlock` 中“上下文/栈/完成状态”的作用
+- [x] 能从 Trap 分支区分 `SupervisorTimer` 与 `UserEnvCall` 两类事件
+- [x] 能完成 `./test.sh base`（以及练习时 `./test.sh exercise`）
 
 ## 概念-源码-测试三联表
 

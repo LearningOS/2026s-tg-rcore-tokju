@@ -92,11 +92,16 @@ pub fn print_result(result: &CheckResult, verbose: bool) {
         println!();
     }
 
-    let status = if result.is_success() {
-        "PASSED".green().bold()
-    } else {
-        "FAILED".red().bold()
-    };
+    // Change the Test Summary Text
 
-    println!("Test {}: {}/{}", status, result.passed, result.total);
+    // let status = if result.is_success() {
+    //     "PASSED".green().bold()
+    // } else {
+    //     "FAILED".red().bold()
+    // };
+
+    println!(
+        "Test Summary(PASSED/TOTAL): {}/{}",
+        result.passed, result.total
+    );
 }

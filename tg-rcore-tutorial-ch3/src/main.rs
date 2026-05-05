@@ -54,6 +54,9 @@ core::arch::global_asm!(include_str!(env!("APP_ASM")));
 // 最大支持的应用程序数量
 const APP_CAPACITY: usize = 32;
 
+// 将任务控制块数组放在静态存储区，避免占用过大的内核栈空间
+static mut TCBS: [TaskControlBlock; APP_CAPACITY] = [TaskControlBlock::ZERO; APP_CAPACITY];
+
 // 定义内核入口点：分配 (APP_CAPACITY + 2) * 8 KiB = 272 KiB 的内核栈
 // 比第二章更大，因为需要同时容纳多个任务的内核上下文。
 //
@@ -104,7 +107,7 @@ extern "C" fn rust_main() -> ! {
     tg_syscall::init_trace(&SyscallContext);
 
     // 第四步：初始化任务控制块数组，加载所有用户程序
-    let mut tcbs = [TaskControlBlock::ZERO; APP_CAPACITY];
+    let tcbs = unsafe { core::ptr::addr_of_mut!(TCBS).as_mut().unwrap() };
     let mut index_mod = 0;
     for (i, app) in tg_linker::AppMeta::locate().iter().enumerate() {
         let entry = app.as_ptr() as usize;

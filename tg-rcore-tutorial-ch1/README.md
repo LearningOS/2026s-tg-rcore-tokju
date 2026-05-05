@@ -48,10 +48,10 @@ tg-rcore-tutorial-ch1/
 
 ## DoD 验收标准（本章完成判据）
 
-- [ ] 能在 `tg-rcore-tutorial-ch1` 目录执行 `cargo run`，看到 `Hello, world!` 并正常关机退出
-- [ ] 能解释 `#![no_std]` 与 `#![no_main]` 在裸机实验中的必要性
-- [ ] 能从 `src/main.rs` 说明 `_start -> rust_main -> panic_handler` 的控制流
-- [ ] 能说明 `tg-rcore-tutorial-sbi` 在本章承担的最小职责（输出字符与关机）
+- [x] 能在 `tg-rcore-tutorial-ch1` 目录执行 `cargo run`，看到 `Hello, world!` 并正常关机退出
+- [x] 能解释 `#![no_std]` 与 `#![no_main]` 在裸机实验中的必要性
+- [x] 能从 `src/main.rs` 说明 `_start -> rust_main -> panic_handler` 的控制流
+- [x] 能说明 `tg-rcore-tutorial-sbi` 在本章承担的最小职责（输出字符与关机）
 
 ## 概念-源码-测试三联表
 

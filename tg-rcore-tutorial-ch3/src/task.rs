@@ -24,6 +24,7 @@ use tg_syscall::{Caller, SyscallId};
 /// - `ctx`：用户态上下文（所有通用寄存器 + 控制寄存器），用于任务切换时保存/恢复状态
 /// - `finish`：任务是否已完成（退出或被杀死）
 /// - `stack`：用户栈空间（8 KiB），每个任务有独立的栈
+/// - `syscall_counts`：系统调用计数数组，用于 trace 功能
 pub struct TaskControlBlock {
     /// 用户态上下文：保存 Trap 时的所有寄存器状态
     ctx: LocalContext,
@@ -32,6 +33,9 @@ pub struct TaskControlBlock {
     /// 用户栈：8 KiB（1024 个 usize = 1024 × 8 = 8192 字节）
     /// 每个任务拥有独立的栈空间，避免栈溢出影响其他任务
     stack: [usize; 1024],
+    /// 系统调用计数：记录每个系统调用编号的调用次数
+    /// 数组大小 512 足以覆盖常用系统调用编号（trace 为 410）
+    syscall_counts: [usize; 512],
 }
 
 /// 调度事件
@@ -55,16 +59,19 @@ impl TaskControlBlock {
         ctx: LocalContext::empty(),
         finish: false,
         stack: [0; 1024],
+        syscall_counts: [0; 512],
     };
 
     /// 初始化一个任务
     ///
     /// - 清零用户栈
+    /// - 清零系统调用计数
     /// - 创建用户态上下文，设置入口地址和 `sstatus.SPP = User`
     /// - 将栈指针设置为用户栈的栈顶（高地址端）
     pub fn init(&mut self, entry: usize) {
         self.stack.fill(0);
         self.finish = false;
+        self.syscall_counts.fill(0);
         self.ctx = LocalContext::user(entry);
         // 栈从高地址向低地址增长，所以 sp 指向栈顶（数组末尾之后的地址）
         *self.ctx.sp_mut() = self.stack.as_ptr() as usize + core::mem::size_of_val(&self.stack);
@@ -84,11 +91,11 @@ impl TaskControlBlock {
     /// 从用户上下文中提取系统调用 ID（a7 寄存器）和参数（a0-a5 寄存器），
     /// 分发到对应的处理函数，并将返回值写回 a0 寄存器。
     pub fn handle_syscall(&mut self) -> SchedulingEvent {
-        use tg_syscall::{SyscallId as Id, SyscallResult as Ret};
         use SchedulingEvent as Event;
+        use tg_syscall::{SyscallId as Id, SyscallResult as Ret};
 
         // a7 寄存器存放 syscall ID
-        let id = self.ctx.a(7).into();
+        let id: Id = self.ctx.a(7).into();
         // a0-a5 寄存器存放系统调用参数
         let args = [
             self.ctx.a(0),
@@ -98,6 +105,42 @@ impl TaskControlBlock {
             self.ctx.a(4),
             self.ctx.a(5),
         ];
+
+        // 统计系统调用次数
+        let id_num = id.0;
+        if id_num < self.syscall_counts.len() {
+            self.syscall_counts[id_num] += 1;
+        }
+
+        // 特殊处理 trace 系统调用（ID 410）
+        if id == Id::TRACE {
+            let trace_request = args[0];
+            let id_arg = args[1];
+            let data = args[2];
+            let ret = match trace_request {
+                // 读取用户内存一个字节
+                0 => unsafe { *(id_arg as *const u8) as isize },
+                // 写入用户内存一个字节
+                1 => {
+                    unsafe { *(id_arg as *mut u8) = data as u8 };
+                    0
+                }
+                // 查询系统调用次数（本次调用已计入统计）
+                2 => {
+                    if id_arg < self.syscall_counts.len() {
+                        self.syscall_counts[id_arg] as isize
+                    } else {
+                        0
+                    }
+                }
+                // 不支持的 trace_request
+                _ => -1,
+            };
+            *self.ctx.a_mut(0) = ret as _;
+            self.ctx.move_next(); // sepc += 4，跳过 ecall 指令
+            return Event::None;
+        }
+
         match tg_syscall::handle(Caller { entity: 0, flow: 0 }, id, args) {
             Ret::Done(ret) => match id {
                 // exit 系统调用：返回退出事件

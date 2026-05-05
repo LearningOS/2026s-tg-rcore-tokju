@@ -50,6 +50,10 @@ pub struct Process {
     pub heap_bottom: usize,
     /// 当前程序 break 位置（堆顶），通过 sbrk 调整
     pub program_brk: usize,
+    /// stride 调度算法：当前 stride 值
+    pub stride: u64,
+    /// stride 调度算法：进程优先级（>= 2）
+    pub priority: u64,
 }
 
 impl Process {
@@ -63,6 +67,7 @@ impl Process {
         self.context = proc.context;
         self.heap_bottom = proc.heap_bottom;
         self.program_brk = proc.program_brk;
+        self.stride = 0;
     }
 
     /// fork 系统调用的核心实现：复制当前进程创建子进程
@@ -89,6 +94,8 @@ impl Process {
             address_space,
             heap_bottom: self.heap_bottom,
             program_brk: self.program_brk,
+            stride: 0,
+            priority: self.priority,
         })
     }
 
@@ -102,6 +109,11 @@ impl Process {
     /// 5. 映射异界传送门页面
     /// 6. 创建用户态上下文，设置入口地址和栈指针
     pub fn from_elf(elf: ElfFile) -> Option<Self> {
+        Self::from_elf_with_parent(elf, None)
+    }
+
+    /// 从 ELF 文件创建新进程，可选择继承父进程的优先级
+    pub fn from_elf_with_parent(elf: ElfFile, parent: Option<&Process>) -> Option<Self> {
         // 验证 ELF 头：必须是 RISC-V 64 位可执行文件
         let entry = match elf.header.pt2 {
             HeaderPt2::Header64(pt2)
@@ -192,7 +204,17 @@ impl Process {
             address_space,
             heap_bottom,
             program_brk: heap_bottom,
+            stride: 0,
+            priority: parent.map(|p| p.priority).unwrap_or(16),
         })
+    }
+
+    /// spawn 系统调用的核心实现：从 ELF 创建新进程
+    ///
+    /// 与 fork 不同，spawn 不复制父进程地址空间，
+    /// 而是直接从 ELF 文件加载新程序。
+    pub fn spawn(elf: ElfFile, parent: &Process) -> Option<Self> {
+        Self::from_elf_with_parent(elf, Some(parent))
     }
 
     /// 修改程序 break 位置（实现 sbrk 系统调用）

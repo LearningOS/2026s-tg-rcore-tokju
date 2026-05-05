@@ -60,11 +60,11 @@ tg-rcore-tutorial-ch5/
 
 ## DoD 验收标准（本章完成判据）
 
-- [ ] 能描述 `fork -> exec -> wait` 的完整语义链路
-- [ ] 能从源码解释父子进程关系如何被建立、等待与回收
-- [ ] 能解释 `initproc` 与 `user_shell` 在系统启动后的角色
-- [ ] 能在 Shell 中运行至少一个 fork/wait 相关用户程序并解释输出
-- [ ] 能执行 `./test.sh base`（练习时补充 `./test.sh exercise`）
+- [x] 能描述 `fork -> exec -> wait` 的完整语义链路
+- [x] 能从源码解释父子进程关系如何被建立、等待与回收
+- [x] 能解释 `initproc` 与 `user_shell` 在系统启动后的角色
+- [x] 能在 Shell 中运行至少一个 fork/wait 相关用户程序并解释输出
+- [x] 能执行 `./test.sh base`（练习时补充 `./test.sh exercise`）
 
 ## 概念-源码-测试三联表
 

@@ -66,11 +66,11 @@ tg-rcore-tutorial-ch8/
 
 ## DoD 验收标准（本章完成判据）
 
-- [ ] 能清楚区分 `Process`（资源容器）与 `Thread`（执行单元）的职责边界
-- [ ] 能说明 `PThreadManager` 如何维护 PID/TID 双层关系
-- [ ] 能解释 `thread_create/gettid/waittid` 的核心语义与返回值
-- [ ] 能解释阻塞型同步原语中“阻塞 -> 唤醒 -> 重新入队”的完整路径
-- [ ] 能执行 `./test.sh base`（练习时补充 `./test.sh exercise`）
+- [x] 能清楚区分 `Process`（资源容器）与 `Thread`（执行单元）的职责边界
+- [x] 能说明 `PThreadManager` 如何维护 PID/TID 双层关系
+- [x] 能解释 `thread_create/gettid/waittid` 的核心语义与返回值
+- [x] 能解释阻塞型同步原语中“阻塞 -> 唤醒 -> 重新入队”的完整路径
+- [x] 能执行 `./test.sh base`（练习时补充 `./test.sh exercise`）
 
 ## 概念-源码-测试三联表
 

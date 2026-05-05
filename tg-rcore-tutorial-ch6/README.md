@@ -63,11 +63,11 @@ tg-rcore-tutorial-ch6/
 
 ## DoD 验收标准（本章完成判据）
 
-- [ ] 能说明“用户程序从内嵌镜像迁移到 fs.img”的核心变化
-- [ ] 能解释 VirtIO MMIO 映射为何是文件系统可用前提
-- [ ] 能从代码追踪 `open/read/write/close` 经 fd_table 到具体文件对象的路径
-- [ ] 能在 shell 中运行至少一个文件读写相关用户程序并解释结果
-- [ ] 能执行 `./test.sh base`（练习时补充 `./test.sh exercise`）
+- [x] 能说明“用户程序从内嵌镜像迁移到 fs.img”的核心变化
+- [x] 能解释 VirtIO MMIO 映射为何是文件系统可用前提
+- [x] 能从代码追踪 `open/read/write/close` 经 fd_table 到具体文件对象的路径
+- [x] 能在 shell 中运行至少一个文件读写相关用户程序并解释结果
+- [x] 能执行 `./test.sh base`（练习时补充 `./test.sh exercise`）
 
 ## 概念-源码-测试三联表
 

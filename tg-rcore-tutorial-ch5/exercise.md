@@ -4,7 +4,7 @@
 
 ### 关于之前的 syscall
 
-你仍需要迁移上一章的 `mmap` `munmap` 以适应新的进程结构。
+你仍需要迁移上一章的 `mmap` `munmap` 以适应新的进程结构。上一章在../tg-rcore-tutorial-ch4。
 
 **从本章节开始，不再要求维护 `trace` 这一系统调用**。
 

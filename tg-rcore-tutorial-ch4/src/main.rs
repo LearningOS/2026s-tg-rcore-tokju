@@ -140,6 +140,23 @@ impl ProcessList {
 /// 全局进程列表实例。
 static PROCESSES: ProcessList = ProcessList::new();
 
+/// 系统调用计数器（用于 trace 系统调用的计数功能）。
+struct SyscallCounter(core::cell::UnsafeCell<[usize; 512]>);
+
+unsafe impl Sync for SyscallCounter {}
+
+impl SyscallCounter {
+    const fn new() -> Self {
+        Self(core::cell::UnsafeCell::new([0; 512]))
+    }
+
+    unsafe fn get(&self) -> &mut [usize; 512] {
+        unsafe { &mut *self.0.get() }
+    }
+}
+
+static SYSCALL_COUNTER: SyscallCounter = SyscallCounter::new();
+
 // ========== 内核主函数 ==========
 
 /// 内核主函数：初始化各子系统，建立内核地址空间，加载用户进程。
@@ -230,6 +247,7 @@ extern "C" fn schedule() -> ! {
     tg_syscall::init_trace(&SyscallContext);
     tg_syscall::init_memory(&SyscallContext);
 
+    unsafe { SYSCALL_COUNTER.get().fill(0) };
     // 调度循环：持续执行直到所有进程完成
     while !unsafe { PROCESSES.get_mut().is_empty() } {
         let ctx = unsafe { &mut PROCESSES.get_mut()[0].context };
@@ -249,11 +267,13 @@ extern "C" fn schedule() -> ! {
                 let ctx = &mut ctx.context;
                 let id: Id = ctx.a(7).into();
                 let args = [ctx.a(0), ctx.a(1), ctx.a(2), ctx.a(3), ctx.a(4), ctx.a(5)];
+                unsafe { SYSCALL_COUNTER.get()[id.0] += 1 };
                 match tg_syscall::handle(Caller { entity: 0, flow: 0 }, id, args) {
                     Ret::Done(ret) => match id {
                         // exit：移除进程
                         Id::EXIT => unsafe {
                             PROCESSES.get_mut().remove(0);
+                            SYSCALL_COUNTER.get().fill(0);
                         },
                         // 其他系统调用：写回返回值，sepc += 4
                         _ => {
@@ -264,7 +284,10 @@ extern "C" fn schedule() -> ! {
                     // 不支持的系统调用：杀死进程
                     Ret::Unsupported(_) => {
                         log::info!("id = {id:?}");
-                        unsafe { PROCESSES.get_mut().remove(0) };
+                        unsafe {
+                            PROCESSES.get_mut().remove(0);
+                            SYSCALL_COUNTER.get().fill(0);
+                        }
                     }
                 }
             }
@@ -275,7 +298,10 @@ extern "C" fn schedule() -> ! {
                     stval::read(),
                     ctx.context.pc()
                 );
-                unsafe { PROCESSES.get_mut().remove(0) };
+                unsafe {
+                    PROCESSES.get_mut().remove(0);
+                    SYSCALL_COUNTER.get().fill(0);
+                }
             }
         }
     }
@@ -356,7 +382,7 @@ fn kernel_space(
 /// 与前几章不同，本章的系统调用实现需要进行**地址翻译**：
 /// 用户传入的指针是虚拟地址，内核需要通过页表将其翻译为物理地址才能访问。
 mod impls {
-    use crate::{build_flags, Sv39, PROCESSES};
+    use crate::{build_flags, parse_flags, Sv39, PROCESSES};
     use alloc::alloc::alloc_zeroed;
     use core::{alloc::Layout, ptr::NonNull};
     use tg_console::log;
@@ -562,16 +588,44 @@ mod impls {
     /// - 写入时检查用户地址是否可见且可写
     /// - 使用 translate() 方法进行地址翻译和权限检查
     impl Trace for SyscallContext {
-        #[inline]
         fn trace(
             &self,
-            _caller: Caller,
-            _trace_request: usize,
-            _id: usize,
-            _data: usize,
+            caller: Caller,
+            trace_request: usize,
+            id: usize,
+            data: usize,
         ) -> isize {
-            tg_console::log::info!("trace: not implemented");
-            -1
+            match trace_request {
+                0 => {
+                    const READABLE: VmFlags<Sv39> = build_flags("U_RV");
+                    if let Some(ptr) = unsafe { PROCESSES.get_mut() }
+                        .get_mut(caller.entity)
+                        .unwrap()
+                        .address_space
+                        .translate::<u8>(VAddr::new(id), READABLE)
+                    {
+                        unsafe { *ptr.as_ptr() as isize }
+                    } else {
+                        -1
+                    }
+                }
+                1 => {
+                    const WRITABLE: VmFlags<Sv39> = build_flags("U_WRV");
+                    if let Some(ptr) = unsafe { PROCESSES.get_mut() }
+                        .get_mut(caller.entity)
+                        .unwrap()
+                        .address_space
+                        .translate::<u8>(VAddr::new(id), WRITABLE)
+                    {
+                        unsafe { *ptr.as_ptr() = data as u8 };
+                        0
+                    } else {
+                        -1
+                    }
+                }
+                2 => unsafe { crate::SYSCALL_COUNTER.get()[id] as isize },
+                _ => -1,
+            }
         }
     }
 
@@ -582,7 +636,7 @@ mod impls {
     impl Memory for SyscallContext {
         fn mmap(
             &self,
-            _caller: Caller,
+            caller: Caller,
             addr: usize,
             len: usize,
             prot: i32,
@@ -590,15 +644,86 @@ mod impls {
             _fd: i32,
             _offset: usize,
         ) -> isize {
-            tg_console::log::info!(
-                "mmap: addr = {addr:#x}, len = {len}, prot = {prot}, not implemented"
-            );
-            -1
+            let prot = prot as usize;
+            const PAGE_SIZE: usize = 1 << Sv39::PAGE_BITS;
+
+            if addr & (PAGE_SIZE - 1) != 0 {
+                return -1;
+            }
+            if prot & !0x7 != 0 {
+                return -1;
+            }
+            if prot & 0x7 == 0 {
+                return -1;
+            }
+            if len == 0 {
+                return 0;
+            }
+
+            let process = unsafe { PROCESSES.get_mut() }
+                .get_mut(caller.entity)
+                .unwrap();
+
+            let start_vpn = VAddr::<Sv39>::new(addr).floor();
+            let end_vpn = VAddr::<Sv39>::new(addr + len).ceil();
+
+            for area in process.address_space.areas.iter() {
+                if start_vpn < area.end && end_vpn > area.start {
+                    return -1;
+                }
+            }
+
+            let mut buf: [u8; 5] = *b"U___V";
+            if (prot & 1) != 0 {
+                buf[3] = b'R';
+            }
+            if (prot & 2) != 0 {
+                buf[2] = b'W';
+            }
+            if (prot & 4) != 0 {
+                buf[1] = b'X';
+            }
+            let vm_flags =
+                parse_flags(unsafe { core::str::from_utf8_unchecked(&buf) }).unwrap();
+
+            process.address_space.map(start_vpn..end_vpn, &[], 0, vm_flags);
+            0
         }
 
-        fn munmap(&self, _caller: Caller, addr: usize, len: usize) -> isize {
-            tg_console::log::info!("munmap: addr = {addr:#x}, len = {len}, not implemented");
-            -1
+        fn munmap(&self, caller: Caller, addr: usize, len: usize) -> isize {
+            const PAGE_SIZE: usize = 1 << Sv39::PAGE_BITS;
+
+            if addr & (PAGE_SIZE - 1) != 0 {
+                return -1;
+            }
+            if len == 0 {
+                return 0;
+            }
+
+            let process = unsafe { PROCESSES.get_mut() }
+                .get_mut(caller.entity)
+                .unwrap();
+
+            let start_vpn = VAddr::<Sv39>::new(addr).floor();
+            let end_vpn = VAddr::<Sv39>::new(addr + len).ceil();
+
+            let mut vpn = start_vpn;
+            while vpn < end_vpn {
+                let mut found = false;
+                for area in process.address_space.areas.iter() {
+                    if vpn >= area.start && vpn < area.end {
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    return -1;
+                }
+                vpn = vpn + 1;
+            }
+
+            process.address_space.unmap(start_vpn..end_vpn);
+            0
         }
     }
 }

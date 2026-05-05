@@ -353,7 +353,7 @@ mod impls {
         Sv39, Thread, PROCESSOR,
     };
     use alloc::sync::Arc;
-    use alloc::{alloc::alloc_zeroed, string::String, vec::Vec};
+    use alloc::{alloc::alloc_zeroed, collections::BTreeMap, string::String, vec::Vec};
     use core::{alloc::Layout, ptr::NonNull};
     use spin::Mutex;
     use tg_console::log;
@@ -729,16 +729,33 @@ mod impls {
                 current_proc.semaphore_list.push(Some(Arc::new(Semaphore::new(res_count))));
                 current_proc.semaphore_list.len() - 1
             };
+            // 初始化死锁检测跟踪数据
+            while current_proc.sem_alloc.len() <= id {
+                current_proc.sem_alloc.push(BTreeMap::new());
+                current_proc.sem_pending.push(Vec::new());
+            }
             id as isize
         }
 
         /// V 操作：释放信号量，唤醒等待线程
         fn semaphore_up(&self, _caller: Caller, sem_id: usize) -> isize {
             let processor: *mut ProcessorInner = PROCESSOR.get_mut() as *mut ProcessorInner;
+            let current_tid = unsafe { (*processor).current().unwrap().tid };
             let current_proc = unsafe { (*processor).get_current_proc().unwrap() };
             let sem = Arc::clone(current_proc.semaphore_list[sem_id].as_ref().unwrap());
-            if let Some(tid) = sem.up() {
-                unsafe { (*processor).re_enque(tid); }
+            if let Some(woken_tid) = sem.up() {
+                unsafe { (*processor).re_enque(woken_tid); }
+                if current_proc.deadlock_detect_enabled && sem_id < current_proc.sem_pending.len() {
+                    current_proc.sem_pending[sem_id].retain(|&t| t != woken_tid);
+                }
+            }
+            if current_proc.deadlock_detect_enabled && sem_id < current_proc.sem_alloc.len() {
+                if let Some(v) = current_proc.sem_alloc[sem_id].get_mut(&current_tid) {
+                    *v = v.saturating_sub(1);
+                    if *v == 0 {
+                        current_proc.sem_alloc[sem_id].remove(&current_tid);
+                    }
+                }
             }
             0
         }
@@ -750,7 +767,35 @@ mod impls {
             let tid = current.tid;
             let current_proc = unsafe { (*processor).get_current_proc().unwrap() };
             let sem = Arc::clone(current_proc.semaphore_list[sem_id].as_ref().unwrap());
-            if !sem.down(tid) { -1 } else { 0 }
+            // 死锁检测：仅当获取会阻塞时检查
+            if current_proc.deadlock_detect_enabled {
+                let count = sem.inner.exclusive_access().count;
+                if count <= 0 {
+                    // 可能会阻塞，检查是否会导致死锁
+                    if check_sem_deadlock(processor, tid, sem_id) {
+                        return -0xDEADisize;
+                    }
+                }
+            }
+            if !sem.down(tid) {
+                if current_proc.deadlock_detect_enabled {
+                    while current_proc.sem_pending.len() <= sem_id {
+                        current_proc.sem_pending.push(Vec::new());
+                    }
+                    if !current_proc.sem_pending[sem_id].contains(&tid) {
+                        current_proc.sem_pending[sem_id].push(tid);
+                    }
+                }
+                -1
+            } else {
+                if current_proc.deadlock_detect_enabled {
+                    while current_proc.sem_alloc.len() <= sem_id {
+                        current_proc.sem_alloc.push(BTreeMap::new());
+                    }
+                    *current_proc.sem_alloc[sem_id].entry(tid).or_insert(0) += 1;
+                }
+                0
+            }
         }
 
         /// 创建互斥锁（blocking=true 为阻塞锁）
@@ -778,6 +823,9 @@ mod impls {
             if let Some(tid) = mutex.unlock() {
                 unsafe { (*processor).re_enque(tid); }
             }
+            if current_proc.deadlock_detect_enabled && mutex_id < current_proc.mutex_holder.len() {
+                current_proc.mutex_holder[mutex_id] = None;
+            }
             0
         }
 
@@ -787,8 +835,23 @@ mod impls {
             let current = unsafe { (*processor).current().unwrap() };
             let tid = current.tid;
             let current_proc = unsafe { (*processor).get_current_proc().unwrap() };
+            // 死锁检测
+            if current_proc.deadlock_detect_enabled {
+                if mutex_id < current_proc.mutex_holder.len()
+                    && current_proc.mutex_holder[mutex_id] == Some(tid)
+                {
+                    return -0xDEADisize;
+                }
+                while current_proc.mutex_holder.len() <= mutex_id {
+                    current_proc.mutex_holder.push(None);
+                }
+            }
             let mutex = Arc::clone(current_proc.mutex_list[mutex_id].as_ref().unwrap());
-            if !mutex.lock(tid) { -1 } else { 0 }
+            let ret = if !mutex.lock(tid) { -1 } else { 0 };
+            if current_proc.deadlock_detect_enabled && ret == 0 {
+                current_proc.mutex_holder[mutex_id] = Some(tid);
+            }
+            ret
         }
 
         /// 创建条件变量
@@ -832,11 +895,86 @@ mod impls {
             if !flag { -1 } else { 0 }
         }
 
-        /// 死锁检测（TODO 练习题）
+        /// 死锁检测
         fn enable_deadlock_detect(&self, _caller: Caller, is_enable: i32) -> isize {
-            tg_console::log::info!("enable_deadlock_detect: is_enable = {is_enable}, not implemented");
-            -1
+            let current_proc = PROCESSOR.get_mut().get_current_proc().unwrap();
+            match is_enable {
+                0 => current_proc.deadlock_detect_enabled = false,
+                1 => current_proc.deadlock_detect_enabled = true,
+                _ => return -1,
+            }
+            0
         }
+    }
+
+    /// 信号量死锁检测（银行家算法）
+    fn check_sem_deadlock(processor: *mut ProcessorInner, tid: ThreadId, sem_id: usize) -> bool {
+        let current_pid = unsafe { (*processor).get_current_proc().unwrap().pid };
+        let thread_ids: Vec<ThreadId> = unsafe {
+            (*processor).get_thread(current_pid).map(|v| v.clone()).unwrap_or_default()
+        };
+        let current_proc = unsafe { (*processor).get_current_proc().unwrap() };
+
+        let n_sems = current_proc.semaphore_list.len();
+        let n_threads = thread_ids.len();
+        if n_threads == 0 {
+            return false;
+        }
+
+        let mut available = vec![0isize; n_sems];
+        for j in 0..n_sems {
+            if let Some(Some(sem)) = current_proc.semaphore_list.get(j) {
+                let count = sem.inner.exclusive_access().count;
+                available[j] = 0isize.max(count);
+            }
+        }
+        available[sem_id] = 0;
+
+        let mut need = vec![vec![0isize; n_sems]; n_threads];
+        let mut allocation = vec![vec![0isize; n_sems]; n_threads];
+
+        for (i, &t) in thread_ids.iter().enumerate() {
+            for j in 0..n_sems {
+                allocation[i][j] = *current_proc.sem_alloc.get(j)
+                    .and_then(|m| m.get(&t))
+                    .unwrap_or(&0) as isize;
+            }
+            for j in 0..n_sems {
+                if let Some(pending) = current_proc.sem_pending.get(j) {
+                    if pending.contains(&t) {
+                        need[i][j] = 1;
+                    }
+                }
+            }
+        }
+        if let Some(idx) = thread_ids.iter().position(|&t| t == tid) {
+            need[idx][sem_id] = 1;
+        }
+
+        let mut finish = vec![false; n_threads];
+        loop {
+            let mut found = false;
+            'outer: for i in 0..n_threads {
+                if finish[i] {
+                    continue;
+                }
+                for j in 0..n_sems {
+                    if need[i][j] > available[j] {
+                        continue 'outer;
+                    }
+                }
+                for j in 0..n_sems {
+                    available[j] += allocation[i][j];
+                }
+                finish[i] = true;
+                found = true;
+            }
+            if !found {
+                break;
+            }
+        }
+
+        !finish.iter().all(|&f| f)
     }
 }
 

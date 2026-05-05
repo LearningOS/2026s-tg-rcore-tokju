@@ -10,20 +10,14 @@
 //!
 //! ## 调度算法
 //!
-//! 当前使用简单的 **先进先出（FIFO）** / **时间片轮转（RR）** 调度：
-//! - `add`：将进程加入就绪队列尾部
-//! - `fetch`：从就绪队列头部取出下一个要执行的进程
-//!
-//! 练习题要求实现 **stride 调度算法**，需要修改此模块。
-//!
-//! 教程阅读建议：
-//!
-//! - 先看 `ProcManager`：理解“存储结构(BTreeMap) + 调度结构(VecDeque)”双结构搭配；
-//! - 再看 `Manage` 与 `Schedule` trait：理解抽象层如何为后续替换调度算法留接口；
-//! - 最后结合 `ch5/src/main.rs` 中对 `PROCESSOR` 的调用观察状态流转。
+//! 使用 **stride 调度算法**：
+//! - 每个进程有 stride 和 priority 字段
+//! - pass = BIG_STRIDE / priority
+//! - 每次调度选择 stride 最小的进程
+//! - 调度后 stride += pass
 
 use crate::process::Process;
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::BTreeMap;
 use core::cell::UnsafeCell;
 use tg_task_manage::{Manage, PManager, ProcId, Schedule};
 
@@ -55,18 +49,22 @@ impl Processor {
 /// 全局处理器管理器实例
 pub static PROCESSOR: Processor = Processor::new();
 
+/// BigStride 常量，用于 stride 调度算法
+/// 选择一个较大的值以减少除法误差，同时避免溢出
+const BIG_STRIDE: u64 = 1 << 30;
+
 /// 进程管理器
 ///
 /// 负责管理所有进程实体和调度队列：
 /// - `tasks`：以 ProcId 为键的进程映射表，存储所有进程实体
 /// - `ready_queue`：就绪队列，存储等待执行的进程 PID
 ///
-/// 当前使用 FIFO/RR 调度策略。练习题要求改为 stride 调度算法。
+/// 使用 stride 调度算法。
 pub struct ProcManager {
     /// 所有进程实体的映射表
     tasks: BTreeMap<ProcId, Process>,
-    /// 就绪队列（FIFO 调度）
-    ready_queue: VecDeque<ProcId>,
+    /// 就绪队列（stride 调度）
+    ready_queue: alloc::vec::Vec<ProcId>,
 }
 
 impl ProcManager {
@@ -74,8 +72,31 @@ impl ProcManager {
     pub fn new() -> Self {
         Self {
             tasks: BTreeMap::new(),
-            ready_queue: VecDeque::new(),
+            ready_queue: alloc::vec::Vec::new(),
         }
+    }
+
+    /// 计算进程的 pass 值
+    fn calc_pass(priority: u64) -> u64 {
+        BIG_STRIDE / priority
+    }
+
+    /// 找到就绪队列中 stride 最小的进程索引
+    fn find_min_stride_idx(&self) -> Option<usize> {
+        if self.ready_queue.is_empty() {
+            return None;
+        }
+        let mut min_idx = 0;
+        let mut min_stride = u64::MAX;
+        for (i, pid) in self.ready_queue.iter().enumerate() {
+            if let Some(proc) = self.tasks.get(pid) {
+                if proc.stride < min_stride {
+                    min_stride = proc.stride;
+                    min_idx = i;
+                }
+            }
+        }
+        Some(min_idx)
     }
 }
 
@@ -100,15 +121,24 @@ impl Manage<Process, ProcId> for ProcManager {
     }
 }
 
-/// 实现 Schedule trait：进程调度（当前为 FIFO/RR）
+/// 实现 Schedule trait：进程调度（stride 调度算法）
 impl Schedule<ProcId> for ProcManager {
-    /// 将进程加入就绪队列尾部
+    /// 将进程加入就绪队列
     fn add(&mut self, id: ProcId) {
-        self.ready_queue.push_back(id);
+        self.ready_queue.push(id);
     }
 
-    /// 从就绪队列头部取出下一个要执行的进程
+    /// 取出下一个要执行的进程（stride 最小的）
     fn fetch(&mut self) -> Option<ProcId> {
-        self.ready_queue.pop_front()
+        let idx = self.find_min_stride_idx()?;
+        let pid = self.ready_queue.remove(idx);
+
+        // 更新该进程的 stride
+        if let Some(proc) = self.tasks.get_mut(&pid) {
+            let pass = Self::calc_pass(proc.priority);
+            proc.stride = proc.stride.wrapping_add(pass);
+        }
+
+        Some(pid)
     }
 }

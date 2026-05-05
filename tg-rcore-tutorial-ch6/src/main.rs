@@ -580,35 +580,99 @@ mod impls {
         }
 
         /// linkat 系统调用：创建硬链接
-        ///
-        /// TODO: 实现 linkat 系统调用（练习题）
         fn linkat(
             &self,
             _caller: Caller,
             _olddirfd: i32,
-            _oldpath: usize,
+            oldpath: usize,
             _newdirfd: i32,
-            _newpath: usize,
+            newpath: usize,
             _flags: u32,
         ) -> isize {
-            tg_console::log::info!("linkat: not implemented");
-            -1
+            let current = PROCESSOR.get_mut().current().unwrap();
+            let read_str = |ptr: usize| -> Option<String> {
+                let ptr = current.address_space.translate(VAddr::new(ptr), READABLE)?;
+                let mut s = String::new();
+                let mut raw_ptr: *mut u8 = ptr.as_ptr();
+                loop {
+                    let ch = unsafe { *raw_ptr };
+                    if ch == 0 {
+                        break;
+                    }
+                    s.push(ch as char);
+                    raw_ptr = (raw_ptr as usize + 1) as *mut u8;
+                }
+                Some(s)
+            };
+            let old = match read_str(oldpath) {
+                Some(s) => s,
+                None => return -1,
+            };
+            let new = match read_str(newpath) {
+                Some(s) => s,
+                None => return -1,
+            };
+            if old == new {
+                return -1;
+            }
+            FS.link(&old, &new)
         }
 
         /// unlinkat 系统调用：删除硬链接
-        ///
-        /// TODO: 实现 unlinkat 系统调用（练习题）
-        fn unlinkat(&self, _caller: Caller, _dirfd: i32, _path: usize, _flags: u32) -> isize {
-            tg_console::log::info!("unlinkat: not implemented");
-            -1
+        fn unlinkat(&self, _caller: Caller, _dirfd: i32, path: usize, _flags: u32) -> isize {
+            let current = PROCESSOR.get_mut().current().unwrap();
+            let ptr = match current.address_space.translate(VAddr::new(path), READABLE) {
+                Some(p) => p,
+                None => return -1,
+            };
+            let mut s = String::new();
+            let mut raw_ptr: *mut u8 = ptr.as_ptr();
+            loop {
+                let ch = unsafe { *raw_ptr };
+                if ch == 0 {
+                    break;
+                }
+                s.push(ch as char);
+                raw_ptr = (raw_ptr as usize + 1) as *mut u8;
+            }
+            FS.unlink(&s)
         }
 
         /// fstat 系统调用：获取文件状态
-        ///
-        /// TODO: 实现 fstat 系统调用（练习题）
-        fn fstat(&self, _caller: Caller, _fd: usize, _st: usize) -> isize {
-            tg_console::log::info!("fstat: not implemented");
-            -1
+        fn fstat(&self, _caller: Caller, fd: usize, st: usize) -> isize {
+            let current = PROCESSOR.get_mut().current().unwrap();
+            let file = match current.fd_table.get(fd) {
+                Some(Some(f)) => f,
+                _ => return -1,
+            };
+            let file = file.lock();
+            let inode = match &file.inode {
+                Some(i) => i,
+                None => return -1,
+            };
+            let ino = inode.inode_id() as u64;
+            let (mode, nlink) = inode.read_disk_inode(|disk_inode| {
+                let mode = if disk_inode.is_dir() {
+                    StatMode::DIR
+                } else {
+                    StatMode::FILE
+                };
+                (mode, disk_inode.nlink)
+            });
+            let mut stat = Stat::new();
+            stat.dev = 0;
+            stat.ino = ino;
+            stat.mode = mode;
+            stat.nlink = nlink;
+            let mut ptr = match current
+                .address_space
+                .translate::<Stat>(VAddr::new(st), WRITEABLE)
+            {
+                Some(p) => p,
+                None => return -1,
+            };
+            unsafe { *ptr.as_mut() = stat };
+            0
         }
     }
 
@@ -693,14 +757,44 @@ mod impls {
             current.pid.get_usize() as _
         }
 
-        /// spawn 系统调用（TODO 练习题）
-        fn spawn(&self, _caller: Caller, _path: usize, _count: usize) -> isize {
-            let current = PROCESSOR.get_mut().current().unwrap();
-            tg_console::log::info!(
-                "spawn: parent pid = {}, not implemented",
-                current.pid.get_usize()
-            );
-            -1
+        /// spawn 系统调用：根据路径加载程序创建新进程
+        fn spawn(&self, _caller: Caller, path: usize, count: usize) -> isize {
+            const READABLE: VmFlags<Sv39> = build_flags("RV");
+            let processor: *mut PManager<ProcStruct, ProcManager> =
+                PROCESSOR.get_mut() as *mut _;
+            let current = unsafe { (*processor).current().unwrap() };
+            let name = current
+                .address_space
+                .translate::<u8>(VAddr::new(path), READABLE)
+                .map(|ptr| unsafe {
+                    core::str::from_utf8_unchecked(core::slice::from_raw_parts(
+                        ptr.as_ptr(),
+                        count,
+                    ))
+                });
+            match name {
+                None => -1,
+                Some(name) => match FS.open(name, OpenFlags::RDONLY) {
+                    None => {
+                        log::error!("unknown app: {}", name);
+                        -1
+                    }
+                    Some(fd) => {
+                        let data = read_all(fd);
+                        if let Some(child) =
+                            ProcStruct::from_elf(ElfFile::new(data.as_slice()).unwrap())
+                        {
+                            let pid = child.pid;
+                            unsafe {
+                                (*processor).add(pid, child, current.pid);
+                            }
+                            pid.get_usize() as isize
+                        } else {
+                            -1
+                        }
+                    }
+                },
+            }
         }
 
         /// sbrk 系统调用：调整堆大小
@@ -765,7 +859,7 @@ mod impls {
 
     /// 内存管理系统调用实现
     impl Memory for SyscallContext {
-        /// mmap 系统调用（TODO 练习题）
+        /// mmap 系统调用：分配并映射物理页面
         fn mmap(
             &self,
             _caller: Caller,
@@ -776,16 +870,74 @@ mod impls {
             _fd: i32,
             _offset: usize,
         ) -> isize {
-            tg_console::log::info!(
-                "mmap: addr = {addr:#x}, len = {len}, prot = {prot}, not implemented"
-            );
-            -1
+            let current = PROCESSOR.get_mut().current().unwrap();
+
+            if addr & 0xfff != 0 {
+                return -1;
+            }
+            if prot == 0 || prot & !0x7 != 0 {
+                return -1;
+            }
+
+            let start_vpn = VAddr::<Sv39>::new(addr).floor();
+            let end_vpn = VAddr::<Sv39>::new(addr + len).ceil();
+            let mut vpn = start_vpn;
+            while vpn.val() < end_vpn.val() {
+                if current
+                    .address_space
+                    .translate::<u8>(vpn.base(), READABLE)
+                    .is_some()
+                {
+                    return -1;
+                }
+                vpn = VPN::new(vpn.val() + 1);
+            }
+
+            let mut raw: usize = 1 | (1 << 4);
+            if prot & 0x1 != 0 {
+                raw |= 1 << 1;
+            }
+            if prot & 0x2 != 0 {
+                raw |= 1 << 2;
+            }
+            if prot & 0x4 != 0 {
+                raw |= 1 << 3;
+            }
+            if raw & (1 << 2) != 0 {
+                raw |= 1 << 1;
+            }
+            let flags = unsafe { VmFlags::from_raw(raw) };
+            current
+                .address_space
+                .map(start_vpn..end_vpn, &[], 0, flags);
+            0
         }
 
-        /// munmap 系统调用（TODO 练习题）
+        /// munmap 系统调用：取消映射
         fn munmap(&self, _caller: Caller, addr: usize, len: usize) -> isize {
-            tg_console::log::info!("munmap: addr = {addr:#x}, len = {len}, not implemented");
-            -1
+            let current = PROCESSOR.get_mut().current().unwrap();
+
+            if addr & 0xfff != 0 {
+                return -1;
+            }
+
+            let start_vpn = VAddr::<Sv39>::new(addr).floor();
+            let end_vpn = VAddr::<Sv39>::new(addr + len).ceil();
+
+            let mut vpn = start_vpn;
+            while vpn.val() < end_vpn.val() {
+                if current
+                    .address_space
+                    .translate::<u8>(vpn.base(), READABLE)
+                    .is_none()
+                {
+                    return -1;
+                }
+                vpn = VPN::new(vpn.val() + 1);
+            }
+
+            current.address_space.unmap(start_vpn..end_vpn);
+            0
         }
     }
 }

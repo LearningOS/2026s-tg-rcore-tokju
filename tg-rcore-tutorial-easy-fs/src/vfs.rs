@@ -10,6 +10,7 @@ use spin::{Mutex, MutexGuard};
 pub struct Inode {
     block_id: usize,
     block_offset: usize,
+    inode_id: u32,
     fs: Arc<Mutex<EasyFileSystem>>,
     block_device: Arc<dyn BlockDevice>,
 }
@@ -19,29 +20,36 @@ impl Inode {
     pub fn new(
         block_id: u32,
         block_offset: usize,
+        inode_id: u32,
         fs: Arc<Mutex<EasyFileSystem>>,
         block_device: Arc<dyn BlockDevice>,
     ) -> Self {
         Self {
             block_id: block_id as usize,
             block_offset,
+            inode_id,
             fs,
             block_device,
         }
     }
 
     /// Call a function over a disk inode to read it
-    fn read_disk_inode<V>(&self, f: impl FnOnce(&DiskInode) -> V) -> V {
+    pub fn read_disk_inode<V>(&self, f: impl FnOnce(&DiskInode) -> V) -> V {
         get_block_cache(self.block_id, Arc::clone(&self.block_device))
             .lock()
             .read(self.block_offset, f)
     }
 
     /// Call a function over a disk inode to modify it
-    fn modify_disk_inode<V>(&self, f: impl FnOnce(&mut DiskInode) -> V) -> V {
+    pub fn modify_disk_inode<V>(&self, f: impl FnOnce(&mut DiskInode) -> V) -> V {
         get_block_cache(self.block_id, Arc::clone(&self.block_device))
             .lock()
             .modify(self.block_offset, f)
+    }
+
+    /// Get the inode id
+    pub fn inode_id(&self) -> u32 {
+        self.inode_id
     }
 
     /// Find inode under a disk inode by name
@@ -72,6 +80,7 @@ impl Inode {
                 Arc::new(Self::new(
                     block_id,
                     block_offset,
+                    inode_id,
                     self.fs.clone(),
                     self.block_device.clone(),
                 ))
@@ -133,6 +142,7 @@ impl Inode {
         Some(Arc::new(Self::new(
             block_id,
             block_offset,
+            new_inode_id,
             self.fs.clone(),
             self.block_device.clone(),
         )))
@@ -186,5 +196,118 @@ impl Inode {
             }
         });
         block_cache_sync_all();
+    }
+
+    /// Create a hard link from old_name to new_name in the same directory.
+    pub fn link(&self, old_name: &str, new_name: &str) -> isize {
+        let mut fs = self.fs.lock();
+
+        let src_inode_id = self.read_disk_inode(|disk_inode| {
+            self.find_inode_id(old_name, disk_inode)
+        });
+
+        let src_inode_id = match src_inode_id {
+            Some(id) => id,
+            None => return -1,
+        };
+
+        let exists = self.read_disk_inode(|disk_inode| {
+            self.find_inode_id(new_name, disk_inode).is_some()
+        });
+        if exists {
+            return -1;
+        }
+
+        self.modify_disk_inode(|root_inode| {
+            let file_count = (root_inode.size as usize) / DIRENT_SZ;
+            let new_size = (file_count + 1) * DIRENT_SZ;
+            self.increase_size(new_size as u32, root_inode, &mut fs);
+            let dirent = DirEntry::new(new_name, src_inode_id);
+            root_inode.write_at(
+                file_count * DIRENT_SZ,
+                dirent.as_bytes(),
+                &self.block_device,
+            );
+        });
+
+        let (target_block_id, target_block_offset) = fs.get_disk_inode_pos(src_inode_id);
+        get_block_cache(target_block_id as usize, Arc::clone(&self.block_device))
+            .lock()
+            .modify(target_block_offset, |target_inode: &mut DiskInode| {
+                target_inode.nlink += 1;
+            });
+
+        block_cache_sync_all();
+        0
+    }
+
+    /// Remove a hard link. If nlink reaches 0, free the inode and its data blocks.
+    pub fn unlink(&self, name: &str) -> isize {
+        let mut fs = self.fs.lock();
+
+        let inode_id = self.read_disk_inode(|disk_inode| {
+            self.find_inode_id(name, disk_inode)
+        });
+
+        let inode_id = match inode_id {
+            Some(id) => id,
+            None => return -1,
+        };
+
+        self.modify_disk_inode(|root_inode| {
+            let file_count = (root_inode.size as usize) / DIRENT_SZ;
+            let mut target_pos = None;
+            for i in 0..file_count {
+                let mut dirent = DirEntry::empty();
+                root_inode.read_at(
+                    i * DIRENT_SZ,
+                    dirent.as_bytes_mut(),
+                    &self.block_device,
+                );
+                if dirent.name() == name {
+                    target_pos = Some(i);
+                    break;
+                }
+            }
+            if let Some(pos) = target_pos {
+                for i in pos..file_count - 1 {
+                    let mut next_dirent = DirEntry::empty();
+                    root_inode.read_at(
+                        (i + 1) * DIRENT_SZ,
+                        next_dirent.as_bytes_mut(),
+                        &self.block_device,
+                    );
+                    root_inode.write_at(
+                        i * DIRENT_SZ,
+                        next_dirent.as_bytes(),
+                        &self.block_device,
+                    );
+                }
+                root_inode.size -= DIRENT_SZ as u32;
+            }
+        });
+
+        let (target_block_id, target_block_offset) = fs.get_disk_inode_pos(inode_id);
+        let nlink = get_block_cache(target_block_id as usize, Arc::clone(&self.block_device))
+            .lock()
+            .modify(target_block_offset, |target_inode: &mut DiskInode| {
+                target_inode.nlink -= 1;
+                target_inode.nlink
+            });
+
+        if nlink == 0 {
+            get_block_cache(target_block_id as usize, Arc::clone(&self.block_device))
+                .lock()
+                .modify(target_block_offset, |target_inode: &mut DiskInode| {
+                    let data_blocks = target_inode.clear_size(&self.block_device);
+                    for block in data_blocks {
+                        fs.dealloc_data(block);
+                    }
+                });
+            fs.inode_bitmap.dealloc(&self.block_device, inode_id as usize);
+        }
+
+        block_cache_sync_all();
+        0
     }
 }

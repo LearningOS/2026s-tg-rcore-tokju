@@ -53,11 +53,11 @@ tg-rcore-tutorial-ch2/
 
 ## DoD 验收标准（本章完成判据）
 
-- [ ] 能在 `tg-rcore-tutorial-ch2` 目录运行 `cargo run`，观察多个用户程序被依次装载与执行
-- [ ] 能解释 U/S 特权级切换与 `ecall` 触发 Trap 的基本路径
-- [ ] 能从代码定位 syscall 参数来源（`a0~a5`）与 syscall 号来源（`a7`）
-- [ ] 能说明为什么 syscall 返回前需要 `sepc += 4`（跳过 `ecall` 指令）
-- [ ] 能执行 `./test.sh base` 并通过基础测试
+- [x] 能在 `tg-rcore-tutorial-ch2` 目录运行 `cargo run`，观察多个用户程序被依次装载与执行
+- [x] 能解释 U/S 特权级切换与 `ecall` 触发 Trap 的基本路径
+- [x] 能从代码定位 syscall 参数来源（`a0~a5`）与 syscall 号来源（`a7`）
+- [x] 能说明为什么 syscall 返回前需要 `sepc += 4`（跳过 `ecall` 指令）
+- [x] 能执行 `./test.sh base` 并通过基础测试
 
 ## 概念-源码-测试三联表
 
