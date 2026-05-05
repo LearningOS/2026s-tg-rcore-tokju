@@ -25,7 +25,7 @@
   - 与AI合作的实现过程（包括如何与AI交互，碰到的问题/bug、解决过程等）
   - 学习效果评估（包括自己在这个学习过程中知识和能力的提升/下降评价，与本校现有教学实验教程的定量/定性的对比分析）
 
-[Base Exercise Report](/base_exercise_report.md)
+[Base Exercise Report](/docs/base_exercise_report.md)
 
 #### 改进教程
 充分利用各类AI工具，基于本教学实验教程--`tg-rcore-tutorial`，结合自身兴趣与学习需求，进行改进、扩展、裁剪、重构，或者自己从零构建，形成自己的个性化教学实验教程。需提交一份设计总结报告，内容包括：  
